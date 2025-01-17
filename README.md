@@ -21,7 +21,7 @@ A lightweight Go server that demonstrates real-time streaming of AI responses us
 
 ```bash
 git clone <repository-url>
-cd gpt-stream-example
+cd golang-ai-stream
 ```
 
 2. Install dependencies:

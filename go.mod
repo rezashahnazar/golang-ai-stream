@@ -1,4 +1,4 @@
-module gpt-stream-example
+module golang-ai-stream
 
 go 1.23.5
 
