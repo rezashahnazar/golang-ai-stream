@@ -1,14 +1,15 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	"golang-ai-stream/config"
-	"golang-ai-stream/errors"
 	"golang-ai-stream/logger"
 	"golang-ai-stream/middleware"
 	"golang-ai-stream/models"
@@ -16,12 +17,23 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
+// ChatCompletionStreamer interface for better testability
+type ChatCompletionStreamer interface {
+	Recv() (*openai.ChatCompletionStreamResponse, error)
+	Close()
+}
+
+// OpenAIClient interface for better testability
+type OpenAIClient interface {
+	CreateChatCompletionStream(ctx context.Context, req openai.ChatCompletionRequest) (ChatCompletionStreamer, error)
+}
+
 type ChatHandler struct {
-	client *openai.Client
+	client OpenAIClient
 	config *config.Config
 }
 
-func NewChatHandler(client *openai.Client, cfg *config.Config) *ChatHandler {
+func NewChatHandler(client OpenAIClient, cfg *config.Config) *ChatHandler {
 	return &ChatHandler{
 		client: client,
 		config: cfg,
@@ -41,23 +53,6 @@ func (h *ChatHandler) validateRequest(reqBody *models.ChatRequest) error {
 func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	requestID := r.Context().Value(middleware.RequestIDKey).(string)
 	
-	var reqBody models.ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
-		logger.LogError(requestID, err, "Invalid request payload")
-		errors.ErrBadRequest("Invalid request payload").
-			WithRequestID(requestID).
-			RespondWithError(w)
-		return
-	}
-
-	if err := h.validateRequest(&reqBody); err != nil {
-		logger.LogError(requestID, err, "Request validation failed")
-		errors.ErrBadRequest(err.Error()).
-			WithRequestID(requestID).
-			RespondWithError(w)
-		return
-	}
-
 	// Set headers before any potential error responses
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -67,20 +62,35 @@ func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		logger.LogError(requestID, fmt.Errorf("streaming not supported"), "Streaming unsupported")
-		errors.ErrInternalServer("Streaming unsupported by client").
-			WithRequestID(requestID).
-			RespondWithError(w)
+		chunk := models.ChatResponse{
+			Content:   "Streaming unsupported by client",
+			RequestID: requestID,
+			Type:     "error",
+		}
+		writeSSEMessage(w, flusher, chunk)
 		return
 	}
 
-	// Send initial SSE message to confirm connection
-	chunk := models.ChatResponse{
-		Content:   "",
-		RequestID: requestID,
-		Type:     "connected",
+	var reqBody models.ChatRequest
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+		logger.LogError(requestID, err, "Invalid request payload")
+		chunk := models.ChatResponse{
+			Content:   "Invalid request payload",
+			RequestID: requestID,
+			Type:     "error",
+		}
+		writeSSEMessage(w, flusher, chunk)
+		return
 	}
-	if err := writeSSEMessage(w, flusher, chunk); err != nil {
-		logger.LogError(requestID, err, "Error writing initial SSE message")
+
+	if err := h.validateRequest(&reqBody); err != nil {
+		logger.LogError(requestID, err, "Request validation failed")
+		chunk := models.ChatResponse{
+			Content:   err.Error(),
+			RequestID: requestID,
+			Type:     "error",
+		}
+		writeSSEMessage(w, flusher, chunk)
 		return
 	}
 
@@ -93,10 +103,9 @@ func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		Stream:   true,
 	}
 
-	ctx := r.Context()
-	stream, err := h.client.CreateChatCompletionStream(ctx, chatReq)
+	stream, err := h.client.CreateChatCompletionStream(r.Context(), chatReq)
 	if err != nil {
-		logger.LogError(requestID, err, "Error creating chat completion stream")
+		logger.LogError(fmt.Sprintf("[%s] Error creating chat completion stream", requestID), err, "error")
 		chunk := models.ChatResponse{
 			Content:   "Failed to create chat completion stream",
 			RequestID: requestID,
@@ -107,38 +116,12 @@ func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer stream.Close()
 
-	// Monitor for client disconnection
+	errCh := make(chan error, 1)
 	go func() {
-		<-ctx.Done()
-		stream.Close()
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			logger.LogInfo(fmt.Sprintf("[%s] Client disconnected", requestID))
-			return
-		default:
+		for {
 			response, err := stream.Recv()
 			if err != nil {
-				if err == io.EOF {
-					// Send completion message
-					chunk := models.ChatResponse{
-						Content:   "",
-						RequestID: requestID,
-						Type:     "done",
-					}
-					writeSSEMessage(w, flusher, chunk)
-					return
-				}
-				
-				logger.LogError(requestID, err, "Error receiving stream response")
-				chunk := models.ChatResponse{
-					Content:   "An error occurred while processing your request",
-					RequestID: requestID,
-					Type:     "error",
-				}
-				writeSSEMessage(w, flusher, chunk)
+				errCh <- err
 				return
 			}
 
@@ -153,10 +136,43 @@ func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 				Type:     "content",
 			}
 			if err := writeSSEMessage(w, flusher, chunk); err != nil {
-				logger.LogError(requestID, err, "Error writing SSE message")
+				errCh <- err
 				return
 			}
 		}
+	}()
+
+	select {
+	case <-r.Context().Done():
+		logger.LogInfo(fmt.Sprintf("[%s] Client disconnected", requestID))
+		chunk := models.ChatResponse{
+			Content:   "Client disconnected",
+			RequestID: requestID,
+			Type:     "error",
+		}
+		writeSSEMessage(w, flusher, chunk)
+		return
+	case err := <-errCh:
+		if errors.Is(err, context.Canceled) {
+			return // Already handled by context.Done() case
+		}
+		if err == io.EOF {
+			chunk := models.ChatResponse{
+				Content:   "",
+				RequestID: requestID,
+				Type:     "done",
+			}
+			writeSSEMessage(w, flusher, chunk)
+			return
+		}
+		logger.LogError(fmt.Sprintf("[%s] Failed to receive chat completion", requestID), err, "error")
+		chunk := models.ChatResponse{
+			Content:   "Failed to create chat completion stream",
+			RequestID: requestID,
+			Type:     "error",
+		}
+		writeSSEMessage(w, flusher, chunk)
+		return
 	}
 }
 

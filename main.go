@@ -17,6 +17,41 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
+// openAIClientWrapper wraps the OpenAI client to implement our interface
+type openAIClientWrapper struct {
+	client *openai.Client
+}
+
+type streamWrapper struct {
+	stream *openai.ChatCompletionStream
+}
+
+func (s *streamWrapper) Recv() (*openai.ChatCompletionStreamResponse, error) {
+	resp, err := s.stream.Recv()
+	if err != nil {
+		return nil, err
+	}
+	return &openai.ChatCompletionStreamResponse{
+		ID:      resp.ID,
+		Object:  resp.Object,
+		Created: resp.Created,
+		Model:   resp.Model,
+		Choices: resp.Choices,
+	}, nil
+}
+
+func (s *streamWrapper) Close() {
+	s.stream.Close()
+}
+
+func (w *openAIClientWrapper) CreateChatCompletionStream(ctx context.Context, req openai.ChatCompletionRequest) (handlers.ChatCompletionStreamer, error) {
+	stream, err := w.client.CreateChatCompletionStream(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return &streamWrapper{stream: stream}, nil
+}
+
 func main() {
 	// Load configuration
 	cfg, err := config.LoadConfig()
@@ -30,8 +65,11 @@ func main() {
 	config.BaseURL = cfg.BaseURL
 	client := openai.NewClientWithConfig(config)
 
+	// Wrap the OpenAI client
+	clientWrapper := &openAIClientWrapper{client: client}
+
 	// Initialize handlers
-	chatHandler := handlers.NewChatHandler(client, cfg)
+	chatHandler := handlers.NewChatHandler(clientWrapper, cfg)
 
 	// Initialize rate limiter
 	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit)

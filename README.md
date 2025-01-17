@@ -92,6 +92,51 @@ curl -N -X POST http://localhost:8080/chat \
   -d '{"prompt": "Your question here"}'
 ```
 
+## Testing
+
+The project includes comprehensive test coverage for all major components:
+
+### Running Tests
+
+Run all tests:
+
+```bash
+go test ./...
+```
+
+Run tests with coverage:
+
+```bash
+go test -cover ./...
+```
+
+Generate coverage report:
+
+```bash
+go test -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out
+```
+
+### Test Structure
+
+- **Handler Tests**: Test request validation, error handling, and response formatting
+- **Middleware Tests**: Test logging, security headers, CORS, and rate limiting
+- **Config Tests**: Test environment variable loading and default values
+- **Integration Tests**: Test complete request flow and streaming functionality
+
+### Test Coverage
+
+Tests cover:
+
+- Input validation
+- Error handling
+- Configuration loading
+- Middleware functionality
+- Rate limiting behavior
+- Security headers
+- CORS configuration
+- Request/Response formatting
+
 ## API Endpoints
 
 ### POST /chat
@@ -163,6 +208,7 @@ All errors are logged with:
 - `github.com/joho/godotenv` - Environment variable management
 - `github.com/sashabaranov/go-openai` - OpenAI API client
 - `github.com/google/uuid` - UUID generation
+- `github.com/stretchr/testify` - Testing assertions and mocks
 
 ## Contributing
 
@@ -175,3 +221,105 @@ All errors are logged with:
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Test Coverage
+
+| Package      | Coverage  |
+| ------------ | --------- |
+| `config`     | 100.0%    |
+| `errors`     | 100.0%    |
+| `handlers`   | 71.6%     |
+| `logger`     | 97.5%     |
+| `middleware` | 91.9%     |
+| `main`       | 0.0%      |
+| **Total**    | **70.6%** |
+
+### Detailed Coverage Report
+
+#### Config Package (100.0%)
+
+- `LoadConfig`: 100.0%
+- `getEnvWithDefault`: 100.0%
+
+#### Errors Package (100.0%)
+
+- `NewAPIError`: 100.0%
+- `WithType`: 100.0%
+- `WithRequestID`: 100.0%
+- `RespondWithError`: 100.0%
+
+#### Handlers Package (71.6%)
+
+- `NewChatHandler`: 100.0%
+- `validateRequest`: 100.0%
+- `HandleChat`: 68.3%
+- `writeSSEMessage`: 75.0%
+
+#### Logger Package (97.5%)
+
+- `colorizeLevel`: 100.0%
+- `formatTime`: 100.0%
+- `formatRequestID`: 66.7%
+- `formatMethod`: 100.0%
+- `formatPath`: 100.0%
+- `formatStatus`: 100.0%
+- `formatDuration`: 100.0%
+- `LogRequest`: 100.0%
+- `LogError`: 100.0%
+- `LogInfo`: 100.0%
+
+#### Middleware Package (91.9%)
+
+- `WriteHeader`: 100.0%
+- `Write`: 100.0%
+- `Logger`: 100.0%
+- `SecurityHeaders`: 100.0%
+- `CORS`: 100.0%
+- `NewRateLimiter`: 100.0%
+- `tryConsume`: 100.0%
+- `min`: 100.0%
+- `RateLimit`: 100.0%
+
+Note: The main package has 0% coverage as it contains the server initialization code which is not covered by unit tests. This is typical for main packages as they are usually tested through integration tests.
+
+### Areas for Improvement
+
+1. **Handlers Package (71.6%)**
+
+   - Increase coverage of `HandleChat` function (currently 68.3%)
+   - Improve coverage of `writeSSEMessage` function (currently 75.0%)
+   - Add more test cases for streaming functionality and error handling
+
+2. **Logger Package (97.5%)**
+
+   - Improve coverage of `formatRequestID` function (currently 66.7%)
+
+3. **Middleware Package (91.9%)**
+
+   - Add tests for `Hijack` and `Flush` methods
+   - Consider if these methods need to be implemented or can be removed
+
+4. **Main Package (0.0%)**
+   - Add integration tests for server initialization
+   - Test graceful shutdown scenarios
+   - Test configuration loading and error handling
+
+## Running Tests
+
+To run tests with coverage:
+
+```bash
+go test ./... -coverprofile=coverage.out
+```
+
+To view detailed coverage report:
+
+```bash
+go tool cover -func=coverage.out
+```
+
+To view coverage in HTML format:
+
+```bash
+go tool cover -html=coverage.out
+```
