@@ -20,7 +20,7 @@ A lightweight Go server that demonstrates real-time streaming of AI responses us
 1. Clone the repository:
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/rezashahnazar/golang-ai-stream.git
 cd golang-ai-stream
 ```
 
