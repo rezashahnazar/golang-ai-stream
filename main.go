@@ -2,93 +2,83 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"time"
+
+	"golang-ai-stream/config"
+	"golang-ai-stream/handlers"
+	"golang-ai-stream/logger"
+	"golang-ai-stream/middleware"
 
 	"github.com/gorilla/mux"
-	"github.com/joho/godotenv"
 	"github.com/sashabaranov/go-openai"
 )
 
-type requestBody struct {
-	Prompt string `json:"prompt"`
-}
-
-type responseChunk struct {
-	Content string `json:"content"`
-}
-
-func init() {
-	if err := godotenv.Load(); err != nil {
-		log.Printf("No .env file found: %v", err)
-	}
-}
-
 func main() {
-	r := mux.NewRouter()
-	r.HandleFunc("/chat", chatHandler).Methods("POST")
-	fmt.Println("Server running on http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", r))
-}
-
-func chatHandler(w http.ResponseWriter, r *http.Request) {
-	var reqBody requestBody
-	err := json.NewDecoder(r.Body).Decode(&reqBody)
+	// Load configuration
+	cfg, err := config.LoadConfig()
 	if err != nil {
-		http.Error(w, "Invalid request payload", http.StatusBadRequest)
-		return
+		logger.LogError("", err, "Failed to load configuration")
+		os.Exit(1)
 	}
 
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-	if apiKey == "" {
-		http.Error(w, "OpenRouter API key not set", http.StatusInternalServerError)
-		return
-	}
-
-	config := openai.DefaultConfig(apiKey)
-	config.BaseURL = "https://openrouter.ai/api/v1"
+	// Initialize OpenAI client
+	config := openai.DefaultConfig(cfg.APIKey)
+	config.BaseURL = cfg.BaseURL
 	client := openai.NewClientWithConfig(config)
 
-	chatReq := openai.ChatCompletionRequest{
-		Model:    "anthropic/claude-3.5-sonnet",
-		Messages: []openai.ChatCompletionMessage{{Role: openai.ChatMessageRoleUser, Content: reqBody.Prompt}},
-		Stream:   true,
+	// Initialize handlers
+	chatHandler := handlers.NewChatHandler(client, cfg)
+
+	// Initialize rate limiter
+	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit)
+
+	// Setup router with middleware
+	r := mux.NewRouter()
+	r.Use(middleware.Logger)
+	r.Use(middleware.SecurityHeaders)
+	r.Use(middleware.CORS)
+	r.Use(middleware.RateLimit(rateLimiter))
+	
+	// Routes
+	r.HandleFunc("/chat", chatHandler.HandleChat).Methods("POST", "OPTIONS")
+	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	}).Methods("GET")
+
+	// Create server with timeouts
+	srv := &http.Server{
+		Addr:         cfg.Port,
+		Handler:      r,
+		ReadTimeout:  time.Duration(cfg.ReadTimeoutSecs) * time.Second,
+		WriteTimeout: time.Duration(cfg.WriteTimeoutSecs) * time.Second,
+		IdleTimeout:  time.Duration(cfg.IdleTimeoutSecs) * time.Second,
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	stream, err := client.CreateChatCompletionStream(context.Background(), chatReq)
-	if err != nil {
-		http.Error(w, "Error creating chat completion stream: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer stream.Close()
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
-		return
-	}
-
-	for {
-		response, err := stream.Recv()
-		if err != nil {
-			break
+	// Start server in a goroutine
+	go func() {
+		logger.LogInfo(fmt.Sprintf("Server running on http://localhost%s", cfg.Port))
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.LogError("", err, "Server failed to start")
+			os.Exit(1)
 		}
+	}()
 
-		content := response.Choices[0].Delta.Content
-		if content == "" {
-			continue
-		}
+	// Graceful shutdown
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	<-c
 
-		chunk := responseChunk{Content: content}
-		chunkJSON, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "data: %s\n\n", chunkJSON)
-		flusher.Flush()
+	logger.LogInfo("Shutting down server...")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.ReadTimeoutSecs)*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		logger.LogError("", err, "Server forced to shutdown")
 	}
+	logger.LogInfo("Server gracefully stopped")
 }
